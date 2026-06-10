@@ -9,7 +9,7 @@ import uvicorn
 
 TOKEN   = "8878624804:AAFeeJHAigv5J1nB4nFmH8YsySFsoaqUUIw"
 # BotHost даёт домен вида bot1234.bothost.tech — вставь свой
-WEBAPP_URL = "https://chesssa.bothost.tech"
+WEBAPP_URL = "https://chesssa.bothost.ru"
 
 # ── Хранилище игр ─────────────────────────────────────────────────────────────
 
