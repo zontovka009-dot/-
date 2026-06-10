@@ -1,0 +1,3 @@
+python-telegram-bot==20.7
+chess==1.10.0
+pillow==10.2.0
