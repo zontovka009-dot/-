@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Шахматы</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body {
+    background: #1a1a2e;
+    color: #fff;
+    font-family: -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 8px;
+    gap: 8px;
+  }
+  #status-bar {
+    width: 100%;
+    max-width: 420px;
+    background: #2a2a3e;
+    border-radius: 12px;
+    padding: 10px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+  }
+  .player { display: flex; align-items: center; gap: 6px; }
+  .player-name { font-weight: 600; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .dot.white { background: #fff; border: 1px solid #aaa; }
+  .dot.black { background: #333; border: 1px solid #777; }
+  .dot.active { box-shadow: 0 0 0 2px #4ade80; }
+  #turn-label {
+    font-size: 11px;
+    background: #3b82f6;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  #turn-label.check { background: #ef4444; }
+  #canvas-wrap {
+    width: min(98vw, 420px);
+    height: min(98vw, 420px);
+  }
+  #board {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 6px;
+    touch-action: none;
+  }
+  #btns {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+    max-width: 420px;
+  }
+  button {
+    flex: 1;
+    padding: 11px;
+    border: none;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    background: #2a2a3e;
+    color: #fff;
+  }
+  button:active { opacity: 0.7; }
+  #btn-resign { background: #dc2626; }
+  #debug {
+    width: 100%;
+    max-width: 420px;
+    background: #111;
+    color: #4ade80;
+    font-size: 11px;
+    font-family: monospace;
+    padding: 6px 10px;
+    border-radius: 8px;
+    min-height: 36px;
+    word-break: break-all;
+  }
+  #overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.8);
+    z-index: 99;
+    justify-content: center;
+    align-items: center;
+  }
+  #overlay.show { display: flex; }
+  #overlay-box {
+    background: #1e1e2e;
+    border-radius: 20px;
+    padding: 32px 28px;
+    text-align: center;
+    max-width: 280px;
+  }
+  #overlay-box h2 { font-size: 22px; margin-bottom: 8px; }
+  #overlay-box p { color: #94a3b8; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div id="status-bar">
+  <div class="player">
+    <div class="dot white" id="dot-white"></div>
+    <span class="player-name" id="name-white">—</span>
+  </div>
+  <span id="turn-label">⏳</span>
+  <div class="player">
+    <div class="dot black" id="dot-black"></div>
+    <span class="player-name" id="name-black">—</span>
+  </div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="board"></canvas>
+</div>
+
+<div id="btns">
+  <button id="btn-resign">🏳 Сдаться</button>
+</div>
+
+<div id="debug">Подключение...</div>
+
+<div id="overlay">
+  <div id="overlay-box">
+    <h2 id="overlay-title">—</h2>
+    <p id="overlay-sub">Игра завершена</p>
+  </div>
+</div>
+
+<script>
+// ── Telegram WebApp ───────────────────────────────────────────────────────────
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.expand(); tg.enableClosingConfirmation(); }
+
+// ── Параметры ─────────────────────────────────────────────────────────────────
+const params   = new URLSearchParams(location.search);
+const GAME_ID  = params.get("game");
+const MY_COLOR = params.get("color") || "white";  // "white" | "black"
+const MY_CINT  = MY_COLOR === "white" ? 1 : 0;
+const FLIPPED  = MY_COLOR === "black";
+
+function dbg(msg) {
+  document.getElementById("debug").textContent = msg;
+  console.log("[chess]", msg);
+}
+
+// ── Canvas setup ──────────────────────────────────────────────────────────────
+const canvas = document.getElementById("board");
+const ctx2   = canvas.getContext("2d");
+
+function resizeCanvas() {
+  const wrap = document.getElementById("canvas-wrap");
+  const sz   = wrap.offsetWidth;
+  canvas.width  = sz;
+  canvas.height = sz;
+  render();
+}
+window.addEventListener("resize", resizeCanvas);
+
+// ── Состояние игры ────────────────────────────────────────────────────────────
+let state = {
+  pieces: {},
+  turn: 1,
+  legal_moves: [],
+  in_check: false,
+  last_move: null,
+  white_name: "—",
+  black_name: "—",
+  status: "waiting",
+  result: ""
+};
+let selected    = null;
+let hintSquares = [];
+let gameOver    = false;
+
+// ── Рендер ────────────────────────────────────────────────────────────────────
+const C_LIGHT    = "#f0d9b5";
+const C_DARK     = "#b58863";
+const C_SEL      = "#7fc97f";
+const C_LASTMOVE = "#cdd16f";
+const C_CHECK    = "#e05050";
+
+const GLYPHS = {
+  "1_6":"♔","1_5":"♕","1_4":"♖","1_3":"♗","1_2":"♘","1_1":"♙",
+  "0_6":"♚","0_5":"♛","0_4":"♜","0_3":"♝","0_2":"♞","0_1":"♟",
+};
+
+function sqToXY(sq) {
+  const file = sq % 8;
+  const rank = Math.floor(sq / 8);
+  const df   = FLIPPED ? (7 - file) : file;
+  const dr   = FLIPPED ? rank : (7 - rank);
+  const cell = canvas.width / 8;
+  return { x: df * cell, y: dr * cell, cell };
+}
+
+function xyToSq(px, py) {
+  const cell = canvas.width / 8;
+  const file = FLIPPED ? (7 - Math.floor(px / cell)) : Math.floor(px / cell);
+  const rank = FLIPPED ? Math.floor(py / cell) : (7 - Math.floor(py / cell));
+  if (file < 0 || file > 7 || rank < 0 || rank > 7) return -1;
+  return rank * 8 + file;
+}
+
+function render() {
+  const sz   = canvas.width;
+  const cell = sz / 8;
+
+  ctx2.clearRect(0, 0, sz, sz);
+
+  // Клетки
+  for (let rank = 0; rank < 8; rank++) {
+    for (let file = 0; file < 8; file++) {
+      const sq = rank * 8 + file;
+      const {x, y} = sqToXY(sq);
+      const light = (file + rank) % 2 === 0;
+
+      let bg = light ? C_LIGHT : C_DARK;
+      if (state.last_move && (state.last_move[0] === sq || state.last_move[1] === sq))
+        bg = C_LASTMOVE;
+      const p = state.pieces[sq];
+      if (state.in_check && p && p.type === 6 && p.color === state.turn)
+        bg = C_CHECK;
+      if (sq === selected)
+        bg = C_SEL;
+
+      ctx2.fillStyle = bg;
+      ctx2.fillRect(x, y, cell, cell);
+
+      // Подсветка ходов
+      if (hintSquares.includes(sq)) {
+        if (state.pieces[sq]) {
+          ctx2.fillStyle = "rgba(220,80,80,0.5)";
+          ctx2.fillRect(x, y, cell, cell);
+        } else {
+          ctx2.fillStyle = "rgba(70,160,255,0.6)";
+          ctx2.beginPath();
+          ctx2.arc(x + cell/2, y + cell/2, cell * 0.2, 0, Math.PI*2);
+          ctx2.fill();
+        }
+      }
+    }
+  }
+
+  // Координаты
+  const labelSz = Math.max(10, cell * 0.2);
+  ctx2.font = `bold ${labelSz}px sans-serif`;
+  const FILES = FLIPPED ? "hgfedcba" : "abcdefgh";
+  const RANKS = FLIPPED ? "12345678" : "87654321";
+  for (let i = 0; i < 8; i++) {
+    const cell_ = canvas.width / 8;
+    const light_f = (i % 2 === 0);
+    ctx2.fillStyle = light_f ? C_DARK : C_LIGHT;
+    ctx2.fillText(FILES[i], i*cell_ + cell_*0.05, sz - cell_*0.05);
+    ctx2.fillStyle = (i % 2 === 0) ? C_DARK : C_LIGHT;
+    ctx2.fillText(RANKS[i], cell_*0.04, i*cell_ + cell_*0.22);
+  }
+
+  // Фигуры
+  ctx2.textAlign    = "center";
+  ctx2.textBaseline = "middle";
+
+  for (const [sqStr, p] of Object.entries(state.pieces)) {
+    const sq = parseInt(sqStr);
+    const {x, y, cell: c} = sqToXY(sq);
+    const glyph = GLYPHS[`${p.color}_${p.type}`];
+    if (!glyph) continue;
+
+    ctx2.font = `${c * 0.75}px serif`;
+
+    // Тень
+    ctx2.fillStyle = p.color === 1 ? "rgba(0,0,0,0.45)" : "rgba(255,255,255,0.25)";
+    ctx2.fillText(glyph, x + c/2 + 1, y + c/2 + 2);
+    // Фигура
+    ctx2.fillStyle = p.color === 1 ? "#ffffff" : "#111111";
+    ctx2.fillText(glyph, x + c/2, y + c/2);
+  }
+}
+
+// ── Обновление UI ─────────────────────────────────────────────────────────────
+function applyState(s) {
+  state = s;
+  document.getElementById("name-white").textContent = s.white_name;
+  document.getElementById("name-black").textContent = s.black_name;
+
+  const tl = document.getElementById("turn-label");
+  if (s.status === "ended") {
+    tl.textContent = "🏁 Конец";
+    tl.className = "";
+  } else {
+    tl.textContent = s.turn === 1 ? "Белые ♙" : "Чёрные ♟";
+    tl.className   = s.in_check ? "check" : "";
+  }
+
+  const dw = document.getElementById("dot-white");
+  const db = document.getElementById("dot-black");
+  dw.className = "dot white" + (s.turn===1 && s.status!=="ended" ? " active" : "");
+  db.className = "dot black" + (s.turn===0 && s.status!=="ended" ? " active" : "");
+
+  selected    = null;
+  hintSquares = [];
+  render();
+
+  const pieceCount = Object.keys(s.pieces).length;
+  dbg(`Статус: ${s.status} | Ход: ${s.turn===1?"белые":"чёрные"} | Фигур: ${pieceCount} | Игра: #${GAME_ID}`);
+
+  if (s.status === "ended" && !gameOver) {
+    gameOver = true;
+    setTimeout(() => {
+      document.getElementById("overlay-title").textContent = s.result || "Игра завершена";
+      document.getElementById("overlay").classList.add("show");
+    }, 600);
+  }
+}
+
+// ── Клики ─────────────────────────────────────────────────────────────────────
+canvas.addEventListener("click", e => {
+  if (gameOver) return;
+  if (state.turn !== MY_CINT) { dbg("Не твой ход!"); return; }
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const px = (e.clientX - rect.left) * scaleX;
+  const py = (e.clientY - rect.top)  * scaleY;
+  const sq = xyToSq(px, py);
+  if (sq < 0) return;
+
+  if (selected === null) {
+    const p = state.pieces[sq];
+    if (p && p.color === MY_CINT) {
+      selected    = sq;
+      hintSquares = state.legal_moves.filter(m => m[0] === sq).map(m => m[1]);
+      render();
+      dbg(`Выбрана фигура на ${sq}, ходов: ${hintSquares.length}`);
+    }
+  } else {
+    if (sq === selected) {
+      selected = null; hintSquares = []; render(); return;
+    }
+    if (hintSquares.includes(sq)) {
+      ws.send(JSON.stringify({ type: "move", from: selected, to: sq }));
+      selected = null; hintSquares = []; render();
+      dbg("Ход отправлен...");
+    } else {
+      const p = state.pieces[sq];
+      if (p && p.color === MY_CINT) {
+        selected    = sq;
+        hintSquares = state.legal_moves.filter(m => m[0] === sq).map(m => m[1]);
+        render();
+      } else {
+        selected = null; hintSquares = []; render();
+      }
+    }
+  }
+});
+
+document.getElementById("btn-resign").onclick = () => {
+  if (gameOver) return;
+  if (tg) {
+    tg.showConfirm("Сдаться?", ok => { if (ok) ws.send(JSON.stringify({type:"resign"})); });
+  } else {
+    if (confirm("Сдаться?")) ws.send(JSON.stringify({type:"resign"}));
+  }
+};
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+let ws, reconnTimer;
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const url   = `${proto}//${location.host}/ws/${GAME_ID}/${MY_COLOR}`;
+  dbg("WS: " + url);
+  ws = new WebSocket(url);
+
+  ws.onopen = () => { dbg("✅ Подключено! Ожидаем данные..."); };
+
+  ws.onmessage = e => {
+    try {
+      const data = JSON.parse(e.data);
+      dbg("← " + data.type + (data.type==="state" ? ` (${Object.keys(data.pieces||{}).length} фигур)` : ""));
+      if (data.type === "state")   { applyState(data); }
+      else if (data.type === "joined")  { dbg("👥 " + data.msg); }
+      else if (data.type === "error")   { dbg("❌ " + data.msg); }
+      else if (data.type === "illegal") { dbg("⚠️ Недопустимый ход"); selected=null; hintSquares=[]; render(); }
+    } catch(err) {
+      dbg("Ошибка парсинга: " + err);
+    }
+  };
+
+  ws.onclose = ev => {
+    dbg(`WS закрыт (${ev.code}). Реконнект...`);
+    if (!gameOver) reconnTimer = setTimeout(connect, 2500);
+  };
+
+  ws.onerror = err => { dbg("WS ошибка"); ws.close(); };
+}
+
+// ── Старт ─────────────────────────────────────────────────────────────────────
+if (!GAME_ID) {
+  document.body.innerHTML = `<div style="padding:40px;text-align:center;color:#f87171">
+    ❌ Не указан ID игры.<br><br>Используй /newgame в боте.</div>`;
+} else {
+  // Сначала рисуем пустую доску пока не пришли данные
+  setTimeout(() => {
+    resizeCanvas();
+    // Рисуем пустую доску для проверки
+    const sz = canvas.width;
+    const cell = sz / 8;
+    for (let r = 0; r < 8; r++) {
+      for (let f = 0; f < 8; f++) {
+        ctx2.fillStyle = (f+r)%2===0 ? C_LIGHT : C_DARK;
+        ctx2.fillRect(f*cell, r*cell, cell, cell);
+      }
+    }
+    dbg("Доска нарисована. Подключаемся к WS...");
+    connect();
+  }, 100);
+}
+</script>
+</body>
+</html>
