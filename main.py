@@ -4,7 +4,7 @@ from PIL import Image, ImageDraw, ImageFont
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-TOKEN = "ВАШ_ТОКЕН_СЮДА"
+TOKEN = "8878624804:AAFeeJHAigv5J1nB4nFmH8YsySFsoaqUUIw"
 
 games = {}
 
