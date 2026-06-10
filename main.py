@@ -6,9 +6,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppI
 from telegram.ext import Application, CommandHandler, ContextTypes
 import uvicorn
 
-TOKEN   = "ВАШ_ТОКЕН_СЮДА"
+TOKEN   = "8878624804:AAFeeJHAigv5J1nB4nFmH8YsySFsoaqUUIw"
 # BotHost даёт домен вида bot1234.bothost.tech — вставь свой
-WEBAPP_URL = "https://ВАШ_ДОМЕН_СЮДА"
+WEBAPP_URL = "https://chesssa.bothost.tech"
 
 # ── Хранилище игр ─────────────────────────────────────────────────────────────
 
