@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Шахматы</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+
+  body {
+    background: var(--tg-theme-bg-color, #1a1a2e);
+    color: var(--tg-theme-text-color, #fff);
+    font-family: -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 8px;
+    gap: 8px;
+  }
+
+  #status-bar {
+    width: 100%;
+    max-width: 400px;
+    background: var(--tg-theme-secondary-bg-color, #2a2a3e);
+    border-radius: 12px;
+    padding: 10px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+  }
+
+  .player { display: flex; align-items: center; gap: 6px; }
+  .player-name { font-weight: 600; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot.white { background: #fff; border: 1px solid #aaa; }
+  .dot.black { background: #222; border: 1px solid #666; }
+  .dot.active { box-shadow: 0 0 0 2px #4ade80; }
+
+  #turn-label {
+    font-size: 12px;
+    background: #3b82f6;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-weight: 600;
+  }
+  #turn-label.check { background: #ef4444; }
+
+  #canvas-wrap {
+    position: relative;
+    width: min(96vw, 400px);
+    height: min(96vw, 400px);
+  }
+
+  canvas {
+    width: 100%;
+    height: 100%;
+    border-radius: 8px;
+    cursor: pointer;
+    display: block;
+  }
+
+  #btns {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+    max-width: 400px;
+  }
+
+  button {
+    flex: 1;
+    padding: 10px;
+    border: none;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    background: var(--tg-theme-secondary-bg-color, #2a2a3e);
+    color: var(--tg-theme-text-color, #fff);
+  }
+  button:active { opacity: 0.75; }
+  #btn-resign { background: #dc2626; color:#fff; }
+
+  #overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.75);
+    z-index: 10;
+    justify-content: center;
+    align-items: center;
+  }
+  #overlay.show { display: flex; }
+  #overlay-box {
+    background: var(--tg-theme-bg-color, #1e1e2e);
+    border-radius: 20px;
+    padding: 32px 24px;
+    text-align: center;
+    max-width: 280px;
+  }
+  #overlay-box h2 { font-size: 22px; margin-bottom: 10px; }
+  #overlay-box p  { color: #94a3b8; font-size: 14px; }
+
+  #msg-toast {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    background: rgba(30,30,50,0.95);
+    color: #fff; padding: 8px 18px; border-radius: 20px;
+    font-size: 13px; pointer-events: none;
+    opacity: 0; transition: opacity 0.3s;
+    white-space: nowrap;
+  }
+  #msg-toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="status-bar">
+  <div class="player">
+    <div class="dot white" id="dot-white"></div>
+    <span class="player-name" id="name-white">—</span>
+  </div>
+  <span id="turn-label">Загрузка...</span>
+  <div class="player">
+    <div class="dot black" id="dot-black"></div>
+    <span class="player-name" id="name-black">—</span>
+  </div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="board" width="400" height="400"></canvas>
+</div>
+
+<div id="btns">
+  <button id="btn-resign">🏳 Сдаться</button>
+</div>
+
+<div id="overlay">
+  <div id="overlay-box">
+    <h2 id="overlay-title">Игра завершена</h2>
+    <p  id="overlay-sub"></p>
+  </div>
+</div>
+
+<div id="msg-toast"></div>
+
+<script>
+const tg = window.Telegram.WebApp;
+tg.expand();
+tg.enableClosingConfirmation();
+
+// ── Параметры из URL ──────────────────────────────────────────────────────────
+const params   = new URLSearchParams(location.search);
+const GAME_ID  = params.get("game");
+const MY_COLOR = params.get("color"); // "white" | "black"
+const MY_TURN  = MY_COLOR === "white" ? 1 : 0; // chess.WHITE=1 BLACK=0
+
+// ── Canvas ────────────────────────────────────────────────────────────────────
+const canvas = document.getElementById("board");
+const ctx    = canvas.getContext("2d");
+const N      = 400;
+const CELL   = N / 8;
+
+const C_LIGHT    = "#f0d9b5";
+const C_DARK     = "#b58863";
+const C_SEL      = "#7fc97f";
+const C_HINT     = "rgba(70,160,255,0.55)";
+const C_CAPTURE  = "rgba(220,80,80,0.55)";
+const C_LASTMOVE = "#cdd16f";
+const C_CHECK    = "#e05050";
+
+const PIECE_GLYPH = {
+  "1_6":"♔","1_5":"♕","1_4":"♖","1_3":"♗","1_2":"♘","1_1":"♙",
+  "0_6":"♚","0_5":"♛","0_4":"♜","0_3":"♝","0_2":"♞","0_1":"♟",
+};
+
+// Состояние
+let pieces      = {};
+let legalMoves  = [];
+let turn        = 1;
+let selected    = null;
+let hintSquares = [];
+let lastMove    = null;
+let inCheck     = false;
+let gameOver    = false;
+let myColor     = MY_COLOR === "white" ? 1 : 0;
+let isFlipped   = MY_COLOR === "black";
+
+function sqToXY(sq) {
+  const file = sq % 8;
+  const rank = Math.floor(sq / 8);
+  const drawFile = isFlipped ? (7 - file) : file;
+  const drawRank = isFlipped ? rank : (7 - rank);
+  return { x: drawFile * CELL, y: drawRank * CELL };
+}
+
+function xyToSq(px, py) {
+  const file = isFlipped ? (7 - Math.floor(px / CELL)) : Math.floor(px / CELL);
+  const rank = isFlipped ? Math.floor(py / CELL) : (7 - Math.floor(py / CELL));
+  return rank * 8 + file;
+}
+
+function drawBoard(state) {
+  ctx.clearRect(0, 0, N, N);
+
+  for (let rank = 0; rank < 8; rank++) {
+    for (let file = 0; file < 8; file++) {
+      const sq = rank * 8 + file;
+      const {x, y} = sqToXY(sq);
+      const isLight = (file + rank) % 2 === 0;
+
+      // Базовый цвет
+      let bg = isLight ? C_LIGHT : C_DARK;
+
+      // Последний ход
+      if (lastMove && (lastMove[0] === sq || lastMove[1] === sq)) bg = C_LASTMOVE;
+
+      // Шах
+      const p = pieces[sq];
+      if (inCheck && p && p.type === 6 && p.color === turn) bg = C_CHECK;
+
+      ctx.fillStyle = bg;
+      ctx.fillRect(x, y, CELL, CELL);
+
+      // Выделение
+      if (sq === selected) {
+        ctx.fillStyle = C_SEL;
+        ctx.fillRect(x, y, CELL, CELL);
+      }
+
+      // Подсказки ходов
+      if (hintSquares.includes(sq)) {
+        if (pieces[sq]) {
+          ctx.fillStyle = C_CAPTURE;
+          ctx.fillRect(x, y, CELL, CELL);
+        } else {
+          ctx.fillStyle = C_HINT;
+          ctx.beginPath();
+          ctx.arc(x + CELL/2, y + CELL/2, CELL * 0.22, 0, Math.PI*2);
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  // Координаты
+  ctx.font = `bold ${CELL*0.22}px sans-serif`;
+  const FILES = isFlipped ? "hgfedcba" : "abcdefgh";
+  const RANKS = isFlipped ? "12345678" : "87654321";
+  for (let i = 0; i < 8; i++) {
+    const isLightFile = isFlipped ? (i+1)%2===0 : i%2===0;
+    ctx.fillStyle = isLightFile ? C_DARK : C_LIGHT;
+    ctx.fillText(FILES[i], i*CELL + CELL*0.04, N - CELL*0.06);
+    ctx.fillStyle = i%2===0 ? C_DARK : C_LIGHT;
+    ctx.fillText(RANKS[i], CELL*0.04, i*CELL + CELL*0.22);
+  }
+
+  // Фигуры
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = `${CELL * 0.72}px serif`;
+
+  for (const [sqStr, p] of Object.entries(pieces)) {
+    const sq = parseInt(sqStr);
+    const {x, y} = sqToXY(sq);
+    const glyph = PIECE_GLYPH[`${p.color}_${p.type}`] || "?";
+
+    // Тень
+    ctx.fillStyle = p.color === 1 ? "rgba(0,0,0,0.4)" : "rgba(255,255,255,0.2)";
+    ctx.fillText(glyph, x + CELL/2 + 1.5, y + CELL/2 + 2);
+
+    // Фигура
+    ctx.fillStyle = p.color === 1 ? "#fff" : "#111";
+    ctx.fillText(glyph, x + CELL/2, y + CELL/2);
+  }
+}
+
+function updateUI(state) {
+  pieces     = state.pieces || {};
+  legalMoves = state.legal_moves || [];
+  turn       = state.turn;
+  inCheck    = state.in_check;
+  lastMove   = state.last_move;
+
+  document.getElementById("name-white").textContent = state.white_name;
+  document.getElementById("name-black").textContent = state.black_name;
+
+  const tl = document.getElementById("turn-label");
+  if (state.status === "ended") {
+    tl.textContent = "Игра завершена";
+    tl.className = "";
+  } else {
+    tl.textContent = turn === 1 ? "Белые ♙" : "Чёрные ♟";
+    tl.className   = inCheck ? "check" : "";
+  }
+
+  // Активная точка
+  document.getElementById("dot-white").className = "dot white" + (turn===1&&state.status!=="ended"?" active":"");
+  document.getElementById("dot-black").className = "dot black" + (turn===0&&state.status!=="ended"?" active":"");
+
+  drawBoard(state);
+
+  if (state.status === "ended" && !gameOver) {
+    gameOver = true;
+    setTimeout(() => showOverlay(state.result), 400);
+  }
+}
+
+function showOverlay(text) {
+  document.getElementById("overlay-title").textContent = text;
+  document.getElementById("overlay-sub").textContent = "Игра завершена";
+  document.getElementById("overlay").classList.add("show");
+}
+
+function toast(msg, duration=2500) {
+  const el = document.getElementById("msg-toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  setTimeout(() => el.classList.remove("show"), duration);
+}
+
+// ── Клики по доске ────────────────────────────────────────────────────────────
+
+canvas.addEventListener("click", e => {
+  if (gameOver) return;
+  if (turn !== myColor) { toast("Сейчас не твой ход!"); return; }
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = N / rect.width;
+  const scaleY = N / rect.height;
+  const px = (e.clientX - rect.left) * scaleX;
+  const py = (e.clientY - rect.top)  * scaleY;
+  const sq = xyToSq(px, py);
+
+  if (selected === null) {
+    // Выбираем фигуру
+    const p = pieces[sq];
+    if (p && p.color === myColor) {
+      selected    = sq;
+      hintSquares = legalMoves.filter(m => m[0] === sq).map(m => m[1]);
+      drawBoard({});
+    }
+  } else {
+    if (sq === selected) {
+      selected = null; hintSquares = [];
+      drawBoard({});
+      return;
+    }
+    if (hintSquares.includes(sq)) {
+      // Отправляем ход
+      ws.send(JSON.stringify({ type: "move", from: selected, to: sq }));
+      selected = null; hintSquares = [];
+    } else {
+      // Переключаем на другую фигуру
+      const p = pieces[sq];
+      if (p && p.color === myColor) {
+        selected    = sq;
+        hintSquares = legalMoves.filter(m => m[0] === sq).map(m => m[1]);
+        drawBoard({});
+      } else {
+        selected = null; hintSquares = [];
+        drawBoard({});
+      }
+    }
+  }
+});
+
+document.getElementById("btn-resign").onclick = () => {
+  if (gameOver) return;
+  tg.showConfirm("Сдаться?", ok => { if (ok) ws.send(JSON.stringify({type:"resign"})); });
+};
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+
+const WS_URL = `wss://${location.host}/ws/${GAME_ID}/${MY_COLOR}`;
+let ws;
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    document.getElementById("turn-label").textContent = "Подключено ✓";
+  };
+
+  ws.onmessage = e => {
+    const data = JSON.parse(e.data);
+    if (data.type === "state") {
+      updateUI(data);
+    } else if (data.type === "joined") {
+      toast(data.msg);
+    } else if (data.type === "error") {
+      toast("❌ " + data.msg, 4000);
+    } else if (data.type === "illegal") {
+      toast("Недопустимый ход!");
+      selected = null; hintSquares = [];
+    }
+  };
+
+  ws.onclose = () => {
+    if (!gameOver) {
+      setTimeout(connect, 2000); // реконнект
+    }
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+// Старт
+if (!GAME_ID) {
+  document.body.innerHTML = "<div style='padding:40px;text-align:center;color:#f87171'>❌ Не указан ID игры.<br>Используй /newgame в боте.</div>";
+} else {
+  connect();
+}
+</script>
+</body>
+</html>
